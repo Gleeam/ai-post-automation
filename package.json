@@ -1,0 +1,46 @@
+{
+  "name": "gleeam-article-automation",
+  "version": "1.0.0",
+  "description": "Automation script for generating SEO-optimized articles for Gleeam portfolio",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "generate": "node src/index.js",
+    "research": "node src/index.js --research-only",
+    "batch": "node src/index.js --batch",
+    "cron": "node src/cron.js",
+    "cron:daily": "node src/cron.js --count 1 --publish --multilingual",
+    "cron:weekly": "node src/cron.js --count 5 --publish --multilingual",
+    "translate": "node src/translate-article.js",
+    "lint": "eslint src/",
+    "test": "node --test src/**/*.test.js"
+  },
+  "keywords": [
+    "automation",
+    "seo",
+    "content-generation",
+    "openai",
+    "gleeam"
+  ],
+  "author": "Gleeam",
+  "license": "MIT",
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "commander": "^12.1.0",
+    "dotenv": "^16.4.5",
+    "inquirer": "^9.2.15",
+    "mongodb": "^6.3.0",
+    "node-fetch": "^3.3.2",
+    "openai": "^4.28.0",
+    "ora": "^8.0.1",
+    "slugify": "^1.6.6",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "eslint": "^8.57.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
