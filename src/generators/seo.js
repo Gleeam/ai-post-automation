@@ -16,7 +16,8 @@ export async function generateSEO(article) {
   const prompt = generateSEOPrompt(article);
   
   const seo = await generateJSON(SYSTEM_PROMPT_SEO, prompt, {
-    temperature: 0.6 // Plus conservateur pour le SEO
+    temperature: 0.6,
+    maxTokens: 2000 // Largement suffisant pour un petit JSON SEO
   });
 
   // Validation et ajustement des longueurs
@@ -218,54 +219,7 @@ export function analyzeSEOScore(article) {
   };
 }
 
-/**
- * Générer des suggestions d'amélioration SEO
- */
-export function generateSEOSuggestions(article) {
-  const suggestions = [];
-
-  // Vérifier le titre
-  if (!article.title?.includes(' : ') && !article.title?.includes(' - ')) {
-    suggestions.push({
-      field: 'title',
-      priority: 'medium',
-      suggestion: 'Considérez ajouter un séparateur (: ou -) pour structurer le titre'
-    });
-  }
-
-  // Vérifier les liens internes (mention)
-  if (!article.content?.includes('[')) {
-    suggestions.push({
-      field: 'content',
-      priority: 'high',
-      suggestion: 'Ajoutez des liens internes vers d\'autres articles du blog'
-    });
-  }
-
-  // Vérifier les images
-  if (!article.coverImage) {
-    suggestions.push({
-      field: 'coverImage',
-      priority: 'high',
-      suggestion: 'Ajoutez une image de couverture (1200x630px recommandé)'
-    });
-  }
-
-  // Vérifier les listes à puces
-  const bulletCount = (article.content?.match(/^- /gm) || []).length;
-  if (bulletCount < 3) {
-    suggestions.push({
-      field: 'content',
-      priority: 'low',
-      suggestion: 'Ajoutez des listes à puces pour améliorer la lisibilité'
-    });
-  }
-
-  return suggestions;
-}
-
 export default {
   generateSEO,
-  analyzeSEOScore,
-  generateSEOSuggestions
+  analyzeSEOScore
 };

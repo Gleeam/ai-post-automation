@@ -1,23 +1,23 @@
 /**
  * Générateur d'articles complets
  * 
- * Processus en 4 étapes :
- * 1. Recherche et analyse du sujet
- * 2. Création du plan détaillé
+ * Processus :
+ * 1. (Optionnel) Recherche web d'informations actuelles
+ * 2. Analyse du sujet + plan détaillé (un seul appel API)
  * 3. Génération du contenu
- * 4. Optimisation SEO
+ * 4. Post-traitement (nettoyage IA, markdown)
+ * 5. Métadonnées SEO + assemblage final
  */
 
 import { generateCompletion, generateJSON } from '../services/openai.js';
 import { 
   SYSTEM_PROMPT_ARTICLE, 
-  SYSTEM_PROMPT_TOPIC_RESEARCH,
-  SYSTEM_PROMPT_OUTLINE,
-  generateArticlePrompt,
-  generateOutlinePrompt,
-  generateTopicResearchPrompt
+  SYSTEM_PROMPT_TOPIC_AND_OUTLINE,
+  AI_PHRASES_BLACKLIST,
+  generateArticlePrompt
 } from '../prompts/templates.js';
 import { generateSEO } from './seo.js';
+import { researchTopicOnline } from '../services/trends.js';
 import { logger } from '../utils/logger.js';
 import { 
   generateSlug, 
@@ -29,55 +29,68 @@ import {
 } from '../utils/helpers.js';
 
 /**
- * Étape 1: Rechercher et affiner un sujet
+ * Analyser le sujet ET générer le plan en un seul appel API
  */
-export async function researchTopic(input) {
-  logger.step(1, 6, 'Recherche et analyse du sujet');
+export async function researchTopicAndOutline(input, options = {}) {
   
-  const prompt = generateTopicResearchPrompt(input);
+  const {
+    category = 'Développement Web',
+    language = 'fr',
+    onlineContext = null
+  } = options;
   
+  const langLabel = language === 'fr' ? 'Français' : language === 'en' ? 'English' : 'Español';
+  const inputStr = typeof input === 'string' ? input : JSON.stringify(input, null, 2);
+  
+  let prompt = `Sujet à traiter : ${inputStr}
+
+Blog cible : Gleeam (agence web/tech), audience francophone mixte (développeurs, décideurs, curieux de tech).
+Catégorie : ${category}
+Langue : ${langLabel}`;
+
+  if (onlineContext) {
+    prompt += `
+
+--- Informations récentes (recherche web) ---
+${onlineContext}
+--- Fin informations ---`;
+  }
+
+  prompt += `
+
+Analyse ce sujet, détermine le meilleur angle et type d'article, puis génère directement le plan structuré complet.`;
+
   const result = await generateJSON(
-    SYSTEM_PROMPT_TOPIC_RESEARCH,
-    prompt
+    SYSTEM_PROMPT_TOPIC_AND_OUTLINE,
+    prompt,
+    { maxTokens: 4000 }
   );
 
-  logger.info(`Angle proposé: ${result.angle}`);
-  logger.info(`Titre: ${result.proposedTitle}`);
+  // Valider la structure
+  if (!result.sections || result.sections.length === 0) {
+    throw new Error('Plan invalide: aucune section générée');
+  }
+
+  // Assurer que le champ title existe (harmonisation)
+  if (!result.title && result.proposedTitle) {
+    result.title = result.proposedTitle;
+  }
+
+  logger.info(`Type: ${result.articleType || 'analyse'}`);
+  logger.info(`Angle: ${result.angle}`);
+  logger.info(`Titre: ${result.title}`);
+  logger.info(`Plan: ${result.sections.length} sections`);
+  result.sections.forEach((section, i) => {
+    logger.debug(`  ${i + 1}. ${section.h2}`);
+  });
 
   return result;
 }
 
 /**
- * Étape 2: Générer le plan détaillé de l'article
- */
-export async function generateOutline(topic, options = {}) {
-  logger.step(2, 6, 'Création du plan détaillé');
-  
-  const prompt = generateOutlinePrompt(topic, options);
-  
-  const outline = await generateJSON(
-    SYSTEM_PROMPT_OUTLINE,
-    prompt
-  );
-
-  // Valider la structure du plan
-  if (!outline.sections || outline.sections.length === 0) {
-    throw new Error('Plan invalide: aucune section générée');
-  }
-
-  logger.info(`Plan créé: ${outline.sections.length} sections`);
-  outline.sections.forEach((section, i) => {
-    logger.debug(`  ${i + 1}. ${section.h2}`);
-  });
-
-  return outline;
-}
-
-/**
- * Étape 3: Générer le contenu de l'article à partir du plan
+ * Générer le contenu de l'article à partir du plan
  */
 export async function generateContent(topic, outline, options = {}) {
-  logger.step(3, 6, 'Génération du contenu');
   
   const prompt = generateArticlePrompt(topic, {
     ...options,
@@ -104,76 +117,156 @@ export async function generateContent(topic, outline, options = {}) {
 }
 
 /**
- * Post-traiter le contenu pour plus de naturel
+ * Post-traiter le contenu pour nettoyer les patterns IA et garantir un résultat publiable
  */
 function postProcessContent(content) {
   let processed = content;
 
-  // Variations mineures pour plus de naturel
-  const replacements = [
-    [/très important/gi, () => Math.random() > 0.5 ? 'crucial' : 'essentiel'],
-    [/il est important de noter/gi, () => Math.random() > 0.5 ? 'à noter' : 'point important'],
-    [/en conclusion/gi, () => Math.random() > 0.5 ? 'pour conclure' : 'en définitive'],
-    [/de plus en plus/gi, () => Math.random() > 0.5 ? 'toujours plus' : 'de plus en plus'],
-    [/il faut/gi, () => Math.random() > 0.5 ? 'on doit' : 'il convient de'],
-  ];
+  // ── 1. Supprimer les titres H1 accidentels ──
+  processed = processed.replace(/^# .+$/gm, '');
 
-  for (const [pattern, replacement] of replacements) {
-    processed = processed.replace(pattern, replacement);
+  // ── 2. Supprimer les titres méta/génériques qui n'apportent rien au lecteur ──
+  const genericHeadings = [
+    /^#{2,3}\s*(introduction|conclusion|en résumé|pour résumer|ce qu'il faut retenir|pour aller plus loin|faq|questions fréquentes|en bref|récapitulatif|mot de la fin|le mot de la fin)\s*$/gim
+  ];
+  for (const pattern of genericHeadings) {
+    processed = processed.replace(pattern, '');
   }
+
+  // ── 3. Supprimer les méta-commentaires ──
+  const metaComments = [
+    /^.*(?:dans cette section|dans cet article|nous allons (?:voir|explorer|découvrir|aborder)|voyons maintenant|penchons-nous sur|intéressons-nous à|commençons par|avant d'aller plus loin).*$/gim,
+  ];
+  for (const pattern of metaComments) {
+    // Ne supprimer que si la ligne est clairement une phrase de transition méta
+    // (on vérifie que la ligne fait moins de 120 chars pour éviter de supprimer des paragraphes entiers)
+    processed = processed.replace(pattern, (match) => {
+      return match.length < 120 ? '' : match;
+    });
+  }
+
+  // ── 4. Détecter et logger les phrases typiques IA, puis les supprimer quand c'est safe ──
+  const aiPhrasesFound = [];
+  for (const phrase of AI_PHRASES_BLACKLIST) {
+    const regex = new RegExp(phrase, 'gi');
+    const matches = processed.match(regex);
+    if (matches) {
+      matches.forEach(m => aiPhrasesFound.push(m));
+    }
+  }
+  
+  if (aiPhrasesFound.length > 0) {
+    logger.warn(`${aiPhrasesFound.length} tournure(s) IA détectée(s) :`);
+    // Dédupliquer pour l'affichage
+    const unique = [...new Set(aiPhrasesFound.map(p => p.toLowerCase()))];
+    unique.forEach(p => logger.warn(`  → "${p}"`));
+    
+    // Supprimer les tournures IA quand elles apparaissent en début de phrase
+    for (const phrase of AI_PHRASES_BLACKLIST) {
+      // Début de phrase : après un saut de ligne, ou en tout début de texte
+      const startOfSentence = new RegExp(`(^|\\n)${phrase},?\\s*`, 'gim');
+      processed = processed.replace(startOfSentence, '$1');
+      
+      // Après un point + espace (milieu de paragraphe, début de nouvelle phrase)
+      const afterPeriod = new RegExp(`(\\. )${phrase},?\\s*`, 'gim');
+      processed = processed.replace(afterPeriod, '$1');
+    }
+    
+    // Nettoyer les doubles espaces et lignes vides laissés par les suppressions
+    processed = processed.replace(/ {2,}/g, ' ');
+    processed = processed.replace(/^\s+$/gm, '');
+  }
+
+  // ── 5. Nettoyer les doubles sauts de ligne excessifs (artefacts de suppressions) ──
+  processed = processed.replace(/\n{3,}/g, '\n\n');
+
+  // ── 6. S'assurer qu'il y a un saut de ligne avant et après chaque titre ──
+  processed = processed.replace(/([^\n])\n(#{2,3}\s)/g, '$1\n\n$2');
+  processed = processed.replace(/(#{2,3}\s.+)\n([^\n#])/g, '$1\n\n$2');
+
+  // ── 7. Nettoyer le début et la fin ──
+  processed = processed.trim();
 
   return processed;
 }
 
 /**
  * Générer un article complet (processus en 4 étapes)
+ * @param {string|object} input - Sujet ou objet topic
+ * @param {object} options - Options de génération
+ * @param {boolean} options.researchOnline - Rechercher des infos actuelles sur internet
  */
 export async function generateArticle(input, options = {}) {
   logger.header('GÉNÉRATION D\'ARTICLE');
+  const totalSteps = options.researchOnline ? 5 : 4;
   
   try {
     // ═══════════════════════════════════════════
-    // ÉTAPE 1: Recherche du sujet
+    // ÉTAPE 0 (optionnelle): Recherche web en parallèle avec rien (c'est la première chose)
     // ═══════════════════════════════════════════
-    let topic;
-    if (typeof input === 'string' || !input.proposedTitle) {
-      topic = await researchTopic(input);
-    } else {
-      topic = input;
-      logger.step(1, 6, 'Sujet déjà analysé');
-      logger.info(`Titre: ${topic.proposedTitle}`);
+    let onlineContext = null;
+    if (options.researchOnline) {
+      logger.step(1, totalSteps, 'Recherche d\'informations actuelles en ligne');
+      const searchTopic = typeof input === 'string' ? input : (input.proposedTitle || input.title || input);
+      const onlineResearch = await researchTopicOnline(searchTopic, {
+        language: options.language || 'fr'
+      });
+      
+      if (onlineResearch.hasRecentData) {
+        logger.success(`${onlineResearch.sourcesCount} sources trouvées`);
+        onlineContext = onlineResearch.contextSummary;
+      } else {
+        logger.warn('Aucune source récente trouvée');
+      }
     }
 
-    // Préparer les options
+    // ═══════════════════════════════════════════
+    // ÉTAPE 2 (ou 1): Analyse du sujet + plan (UN SEUL appel API)
+    // ═══════════════════════════════════════════
+    const stepOffset = options.researchOnline ? 1 : 0;
+    let outline;
+    
+    if (typeof input === 'string' || !input.sections) {
+      logger.step(1 + stepOffset, totalSteps, 'Analyse du sujet et création du plan');
+      const topicInput = typeof input === 'string' ? input : (input.proposedTitle || input.title || input);
+      outline = await researchTopicAndOutline(topicInput, {
+        category: options.category,
+        language: options.language || process.env.DEFAULT_LANGUAGE || 'fr',
+        onlineContext
+      });
+    } else {
+      // Déjà un outline complet
+      outline = input;
+      logger.step(1 + stepOffset, totalSteps, 'Plan déjà fourni');
+    }
+
+    // Préparer les options pour la rédaction
     const articleOptions = {
-      category: topic.category || options.category,
-      keywords: topic.keyPoints || options.keywords || [],
+      category: outline.category || options.category,
+      keywords: outline.keyPoints || options.keywords || [],
       tone: options.tone || 'professionnel et accessible',
       targetLength: options.targetLength || '1800-2200',
-      language: options.language || process.env.DEFAULT_LANGUAGE || 'fr'
+      language: options.language || process.env.DEFAULT_LANGUAGE || 'fr',
+      onlineContext
     };
 
     // ═══════════════════════════════════════════
-    // ÉTAPE 2: Génération du plan
+    // ÉTAPE 3 (ou 2): Génération du contenu
     // ═══════════════════════════════════════════
-    const outline = await generateOutline(topic, articleOptions);
-
-    // ═══════════════════════════════════════════
-    // ÉTAPE 3: Génération du contenu
-    // ═══════════════════════════════════════════
-    const rawContent = await generateContent(topic, outline, articleOptions);
+    logger.step(2 + stepOffset, totalSteps, 'Génération du contenu');
+    const rawContent = await generateContent(outline, outline, articleOptions);
     
     // ═══════════════════════════════════════════
-    // ÉTAPE 4: Post-traitement
+    // ÉTAPE 4 (ou 3): Post-traitement (instantané, pas d'API)
     // ═══════════════════════════════════════════
-    logger.step(4, 6, 'Post-traitement du contenu');
+    logger.step(3 + stepOffset, totalSteps, 'Post-traitement du contenu');
     const content = postProcessContent(rawContent);
 
     // ═══════════════════════════════════════════
-    // ÉTAPE 5: Génération SEO
+    // ÉTAPE 5 (ou 4): Génération SEO
     // ═══════════════════════════════════════════
-    logger.step(5, 6, 'Génération des métadonnées SEO');
-    const title = outline.title || topic.proposedTitle || topic.title;
+    logger.step(4 + stepOffset, totalSteps, 'Métadonnées SEO + assemblage');
+    const title = outline.title || outline.proposedTitle;
     const seo = await generateSEO({
       title,
       content,
@@ -182,10 +275,8 @@ export async function generateArticle(input, options = {}) {
     });
 
     // ═══════════════════════════════════════════
-    // ÉTAPE 6: Assemblage final
+    // Assemblage final (pas d'appel API)
     // ═══════════════════════════════════════════
-    logger.step(6, 6, 'Assemblage de l\'article final');
-    
     const slug = generateSlug(title);
     const readingTime = estimateReadingTime(content);
 
@@ -208,10 +299,9 @@ export async function generateArticle(input, options = {}) {
       tags: formatTags(seo.tags),
       author: options.author || process.env.DEFAULT_AUTHOR || 'Gleeam',
       readingTime,
-      // Métadonnées de génération (pour debug, non sauvegardées)
       _generation: {
-        topic: topic.originalTopic || input,
-        angle: topic.angle,
+        topic: outline.originalTopic || input,
+        angle: outline.angle,
         outline: {
           sectionsCount: outline.sections.length,
           sections: outline.sections.map(s => s.h2)
@@ -282,8 +372,7 @@ export async function generateArticleBatch(topics, options = {}) {
 }
 
 export default {
-  researchTopic,
-  generateOutline,
+  researchTopicAndOutline,
   generateContent,
   generateArticle,
   generateArticleBatch

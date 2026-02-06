@@ -120,10 +120,13 @@ export async function generateCompletion(systemPrompt, userPrompt, options = {})
 
   // Vérifier si la génération s'est arrêtée prématurément
   if (finishReason === 'length') {
-    logger.warn('Génération tronquée - limite de tokens atteinte');
+    logger.warn(`Génération tronquée (max_tokens: ${maxTokens}) - le contenu peut être incomplet`);
   }
 
-  if (!content) {
+  if (!content || content.trim() === '') {
+    if (finishReason === 'length') {
+      throw new Error('Contenu vide : le modèle n\'a pas eu assez de tokens pour générer une réponse');
+    }
     logger.error('Réponse vide. Choices:', JSON.stringify(completion.choices, null, 2));
     throw new Error('Aucun contenu généré par OpenAI');
   }
@@ -135,64 +138,142 @@ export async function generateCompletion(systemPrompt, userPrompt, options = {})
 
 /**
  * Générer du contenu JSON structuré
+ * Gère automatiquement le retry avec plus de tokens si finish_reason === "length"
  */
 export async function generateJSON(systemPrompt, userPrompt, options = {}) {
   const client = getOpenAI();
   const model = options.model || process.env.OPENAI_MODEL || 'gpt-5-mini';
+  
+  let maxTokens = options.maxTokens ?? 4000;
+  const maxRetries = 2; // On peut retenter 2 fois avec plus de tokens
 
-  // Construire les paramètres selon le modèle
-  const params = {
-    model,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt }
-    ],
-    response_format: { type: 'json_object' }
-  };
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    // Construire les paramètres selon le modèle
+    const params = {
+      model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ],
+      response_format: { type: 'json_object' }
+    };
 
-  // Paramètre de tokens selon le modèle
-  const maxTokens = options.maxTokens ?? 4000;
-  if (usesCompletionTokens(model)) {
-    params.max_completion_tokens = maxTokens;
-  } else {
-    params.max_tokens = maxTokens;
-  }
+    if (usesCompletionTokens(model)) {
+      params.max_completion_tokens = maxTokens;
+    } else {
+      params.max_tokens = maxTokens;
+    }
 
-  // Les modèles o1/o3 ne supportent pas temperature
-  if (!doesNotSupportTemperature(model)) {
-    params.temperature = options.temperature ?? 0.7;
-  }
+    if (!doesNotSupportTemperature(model)) {
+      params.temperature = options.temperature ?? 0.7;
+    }
 
-  const completion = await retryWithBackoff(async () => {
-    return await client.chat.completions.create(params);
-  }, 3, 2000);
+    const completion = await retryWithBackoff(async () => {
+      return await client.chat.completions.create(params);
+    }, 3, 2000);
 
-  const content = completion.choices[0]?.message?.content;
+    const finishReason = completion.choices[0]?.finish_reason;
+    const content = completion.choices[0]?.message?.content;
 
-  if (!content) {
-    logger.error('Réponse JSON vide. Choices:', JSON.stringify(completion.choices, null, 2));
-    throw new Error('Aucun contenu JSON généré par OpenAI');
-  }
+    // Cas 1 : réponse tronquée (finish_reason: "length") — retenter avec plus de tokens
+    if (finishReason === 'length' && attempt < maxRetries) {
+      const oldMax = maxTokens;
+      maxTokens = Math.min(maxTokens * 2, 16000);
+      logger.warn(`JSON tronqué (finish_reason: length, max_tokens: ${oldMax}). Retry avec ${maxTokens} tokens...`);
+      continue;
+    }
 
-  try {
-    return JSON.parse(content);
-  } catch (error) {
-    logger.error('Erreur parsing JSON:', content);
-    throw new Error('Le contenu généré n\'est pas un JSON valide');
+    // Cas 2 : contenu vide malgré les retries
+    if (!content || content.trim() === '') {
+      // Si c'est un problème de length, donner un message clair
+      if (finishReason === 'length') {
+        logger.error(`Réponse JSON vide après ${attempt + 1} tentative(s) (finish_reason: length, max_tokens: ${maxTokens})`);
+        throw new Error('Génération JSON échouée : le modèle manque de tokens pour compléter la réponse. Essayez de réduire la taille du prompt ou d\'augmenter max_tokens.');
+      }
+      logger.error('Réponse JSON vide. Choices:', JSON.stringify(completion.choices, null, 2));
+      throw new Error('Aucun contenu JSON généré par OpenAI');
+    }
+
+    // Cas 3 : on a du contenu, essayer de parser
+    // Si tronqué (length) mais on a du contenu partiel, tenter de le réparer
+    let jsonStr = content;
+    if (finishReason === 'length') {
+      logger.warn('JSON potentiellement tronqué, tentative de réparation...');
+      jsonStr = repairTruncatedJSON(content);
+    }
+
+    try {
+      return JSON.parse(jsonStr);
+    } catch (error) {
+      // Si c'est un problème de troncature et qu'on peut retenter
+      if (finishReason === 'length' && attempt < maxRetries) {
+        const oldMax = maxTokens;
+        maxTokens = Math.min(maxTokens * 2, 16000);
+        logger.warn(`JSON invalide (tronqué). Retry avec ${maxTokens} tokens (était ${oldMax})...`);
+        continue;
+      }
+      logger.error('Erreur parsing JSON:', content.slice(0, 500));
+      throw new Error('Le contenu généré n\'est pas un JSON valide');
+    }
   }
 }
 
 /**
+ * Tenter de réparer un JSON tronqué
+ * Ferme les chaînes, tableaux et objets ouverts
+ */
+function repairTruncatedJSON(content) {
+  let json = content.trim();
+  
+  // Compter les accolades et crochets ouverts/fermés
+  let braces = 0;
+  let brackets = 0;
+  let inString = false;
+  let escaped = false;
+  
+  for (const char of json) {
+    if (escaped) { escaped = false; continue; }
+    if (char === '\\') { escaped = true; continue; }
+    if (char === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (char === '{') braces++;
+    if (char === '}') braces--;
+    if (char === '[') brackets++;
+    if (char === ']') brackets--;
+  }
+  
+  // Si on est dans une string non fermée, la fermer
+  if (inString) {
+    json += '"';
+  }
+  
+  // Fermer les crochets manquants
+  while (brackets > 0) {
+    json += ']';
+    brackets--;
+  }
+  
+  // Fermer les accolades manquantes
+  while (braces > 0) {
+    json += '}';
+    braces--;
+  }
+  
+  return json;
+}
+
+/**
  * Vérifier la connexion OpenAI
+ * Vérifie simplement que la clé API est configurée et que le client s'initialise
+ * (pas d'appel réseau — le premier vrai appel servira de test)
  */
 export async function testOpenAIConnection() {
   try {
-    const client = getOpenAI();
-    await client.models.list();
-    logger.success('Connexion OpenAI vérifiée');
+    getOpenAI(); // Vérifie que la clé API est présente et le client s'initialise
+    logger.success('Client OpenAI prêt');
     return true;
   } catch (error) {
-    logger.error('Erreur connexion OpenAI:', error.message);
+    logger.error('Erreur configuration OpenAI:', error.message);
     return false;
   }
 }

@@ -202,18 +202,19 @@ export async function getTrendingTopics(category = null, options = {}) {
     searchQueries = shuffleArray(getTrendSearchQueries()).slice(0, 5);
   }
 
-  // Recherche web unifiée (Brave/Serper/News API)
-  for (const query of searchQueries.slice(0, 3)) {
-    const webResults = await fetchWebSearch(query, options);
-    topics.push(...webResults);
-  }
+  // Recherche web unifiée en parallèle (Brave/Serper/News API)
+  const webPromises = searchQueries.slice(0, 3).map(query =>
+    fetchWebSearch(query, options)
+  );
+  
+  // Complément avec News API pour les actualités fraîches (en parallèle aussi)
+  const newsPromises = process.env.NEWS_API_KEY
+    ? searchQueries.slice(0, 2).map(query => fetchNewsAPITrends(query, options))
+    : [];
 
-  // Complément avec News API pour les actualités fraîches
-  if (process.env.NEWS_API_KEY) {
-    for (const query of searchQueries.slice(0, 2)) {
-      const newsResults = await fetchNewsAPITrends(query, options);
-      topics.push(...newsResults);
-    }
+  const allResults = await Promise.all([...webPromises, ...newsPromises]);
+  for (const results of allResults) {
+    topics.push(...results);
   }
 
   // Dédupliquer par titre (similitude approximative)
@@ -240,16 +241,16 @@ export function generateTopicSuggestions(category = null) {
   const cat = category ? TOPICS[category] : getRandomCategory();
   
   const templates = [
-    "Guide complet : {keyword} en {year}",
-    "{keyword} : les meilleures pratiques à adopter",
-    "Comment optimiser {keyword} pour de meilleures performances",
-    "{keyword} vs alternatives : comparatif détaillé",
-    "Les erreurs courantes avec {keyword} et comment les éviter",
-    "Pourquoi {keyword} révolutionne le développement moderne",
-    "De débutant à expert : maîtriser {keyword}",
-    "{keyword} : retour d'expérience et conseils pratiques",
-    "L'avenir de {keyword} : tendances et prédictions",
-    "Intégrer {keyword} dans votre stack technique"
+    "Ce que {keyword} change vraiment pour les développeurs en {year}",
+    "{keyword} : pourquoi tout le monde en parle (et ce qu'il faut en penser)",
+    "On a testé {keyword} pendant un mois, voici ce qu'on en retient",
+    "{keyword} face à la concurrence : où en est-on vraiment ?",
+    "Les pièges de {keyword} que personne ne mentionne",
+    "Comment {keyword} s'est imposé sans qu'on s'en rende compte",
+    "{keyword} en {year} : ce qui a changé et ce qui reste à faire",
+    "Faut-il encore miser sur {keyword} ? Notre analyse",
+    "Ce que {keyword} nous apprend sur l'avenir du développement",
+    "{keyword} : le point après un an d'évolutions"
   ];
 
   const year = new Date().getFullYear();
@@ -327,6 +328,66 @@ export async function getBestTopicForCategory(categoryId) {
   };
 }
 
+/**
+ * Rechercher des informations actuelles sur un sujet spécifique
+ * Utile pour enrichir un article avec des données à jour
+ * @param {string} topic - Le sujet à rechercher
+ * @param {object} options - Options de recherche
+ * @returns {object} Contexte enrichi avec sources et informations
+ */
+export async function researchTopicOnline(topic, options = {}) {
+  logger.info(`Recherche d'informations actuelles sur : "${topic}"`);
+  
+  const searchQueries = [
+    topic,
+    `${topic} 2025 2026`,
+    `${topic} actualité news`
+  ];
+  
+  // Lancer toutes les recherches en parallèle
+  const searchPromises = searchQueries.map(query =>
+    fetchWebSearch(query, { ...options, limit: 5 })
+  );
+  const results = await Promise.all(searchPromises);
+  const allResults = results.flat();
+  
+  // Dédupliquer par URL
+  const uniqueResults = [];
+  const seenUrls = new Set();
+  
+  for (const result of allResults) {
+    if (result.url && !seenUrls.has(result.url)) {
+      seenUrls.add(result.url);
+      uniqueResults.push(result);
+    }
+  }
+  
+  // Extraire les informations clés
+  const sources = uniqueResults.slice(0, 8).map(r => ({
+    title: r.title,
+    snippet: r.description,
+    source: r.source,
+    url: r.url,
+    date: r.publishedAt
+  }));
+  
+  // Créer un résumé du contexte pour l'IA
+  const contextSummary = sources.length > 0 
+    ? sources.map(s => `- ${s.title}: ${s.snippet || 'N/A'} (Source: ${s.source})`).join('\n')
+    : 'Aucune information récente trouvée en ligne.';
+  
+  logger.info(`${sources.length} sources trouvées pour enrichir l'article`);
+  
+  return {
+    topic,
+    searchedAt: new Date().toISOString(),
+    sourcesCount: sources.length,
+    sources,
+    contextSummary,
+    hasRecentData: sources.length > 0
+  };
+}
+
 export default {
   fetchBraveSearchTrends,
   fetchSerperTrends,
@@ -335,5 +396,6 @@ export default {
   getTrendingTopics,
   generateTopicSuggestions,
   analyzeTopicRelevance,
-  getBestTopicForCategory
+  getBestTopicForCategory,
+  researchTopicOnline
 };

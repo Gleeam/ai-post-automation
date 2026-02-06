@@ -38,10 +38,33 @@ export function truncateText(text, maxLength, suffix = '...') {
  * Nettoyer et formater le contenu Markdown
  */
 export function cleanMarkdown(content) {
-  return content
-    .replace(/\n{3,}/g, '\n\n') // Réduire les sauts de ligne multiples
-    .replace(/^\s+|\s+$/g, '') // Trim début/fin
-    .replace(/\t/g, '  '); // Tabs en espaces
+  let cleaned = content;
+
+  // Retirer les blocs de code markdown qui wrappent tout l'article (```markdown ... ```)
+  cleaned = cleaned.replace(/^```(?:markdown|md)?\s*\n/i, '');
+  cleaned = cleaned.replace(/\n```\s*$/i, '');
+
+  // Supprimer les éventuels H1 en début d'article (sera ajouté séparément)
+  cleaned = cleaned.replace(/^#\s+.+\n+/, '');
+
+  // Normaliser les sauts de ligne
+  cleaned = cleaned.replace(/\r\n/g, '\n');
+  cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
+
+  // Assurer un espacement correct autour des titres
+  cleaned = cleaned.replace(/([^\n])\n(#{2,3}\s)/g, '$1\n\n$2');
+  cleaned = cleaned.replace(/(#{2,3}\s.+)\n([^\n#])/g, '$1\n\n$2');
+
+  // Tabs en espaces
+  cleaned = cleaned.replace(/\t/g, '  ');
+
+  // Supprimer les espaces en fin de ligne
+  cleaned = cleaned.replace(/ +$/gm, '');
+
+  // Trim début/fin
+  cleaned = cleaned.trim();
+
+  return cleaned;
 }
 
 /**

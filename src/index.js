@@ -114,7 +114,7 @@ async function interactiveMode() {
  * Générer un article sur un sujet spécifique
  */
 async function handleSpecificGeneration(canSaveToDB) {
-  const { topic, category, language } = await inquirer.prompt([
+  const { topic, category, language, researchOnline } = await inquirer.prompt([
     {
       type: 'input',
       name: 'topic',
@@ -137,13 +137,22 @@ async function handleSpecificGeneration(canSaveToDB) {
         { name: '🇪🇸 Español', value: 'es' }
       ],
       default: 'fr'
+    },
+    {
+      type: 'confirm',
+      name: 'researchOnline',
+      message: 'Rechercher des infos actuelles sur internet ?',
+      default: true
     }
   ]);
 
-  const spinner = ora('Génération de l\'article en cours...').start();
+  const spinner = ora(researchOnline 
+    ? 'Recherche d\'informations et génération de l\'article...' 
+    : 'Génération de l\'article en cours...'
+  ).start();
   
   try {
-    const article = await generateArticle(topic, { category, language });
+    const article = await generateArticle(topic, { category, language, researchOnline });
     spinner.succeed('Article généré !');
     
     await displayArticlePreview(article);
@@ -484,6 +493,7 @@ program
   .option('-c, --category <category>', 'Catégorie de l\'article')
   .option('-l, --language <lang>', 'Langue source (fr, en, es)', 'fr')
   .option('-m, --multilingual', 'Générer dans toutes les langues (FR + EN + ES)')
+  .option('-r, --research', 'Rechercher des infos actuelles sur internet avant de générer')
   .option('--research-only', 'Rechercher les tendances uniquement')
   .option('--batch', 'Mode batch (plusieurs articles)')
   .option('--count <n>', 'Nombre d\'articles en batch', '3')
@@ -500,13 +510,26 @@ program
     if (options.topic) {
       // Mode direct avec sujet
       const canSaveToDB = await checkPrerequisites();
-      const spinner = ora('Génération de l\'article...').start();
+      
+      // Afficher les options actives
+      if (options.research) {
+        console.log(chalk.cyan('🔍 Recherche d\'informations actuelles activée'));
+      }
+      if (options.multilingual) {
+        console.log(chalk.cyan('🌍 Génération multilingue activée (FR + EN + ES)'));
+      }
+      
+      const spinner = ora(options.research 
+        ? 'Recherche d\'informations et génération de l\'article...' 
+        : 'Génération de l\'article...'
+      ).start();
       
       try {
         const article = await generateArticle(options.topic, {
           category: options.category,
           language: options.language,
-          autoPublish: options.autoPublish
+          autoPublish: options.autoPublish,
+          researchOnline: options.research
         });
         spinner.succeed('Article généré !');
         
@@ -561,7 +584,7 @@ program
 
         if (saveAll) {
           for (const article of articles) {
-            await saveArticle(article, options.autoPublish);
+            await saveArticle(article, options.autoPublish, options.multilingual, options.language);
           }
         }
       }

@@ -201,13 +201,6 @@ export function getRandomCategory() {
 }
 
 /**
- * Obtenir les mots-clés de toutes les catégories
- */
-export function getAllKeywords() {
-  return Object.values(TOPICS).flatMap(topic => topic.keywords);
-}
-
-/**
  * Obtenir les requêtes de recherche pour les tendances
  */
 export function getTrendSearchQueries() {
